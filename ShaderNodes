@@ -1,0 +1,100 @@
+import random
+import time
+import bpy
+
+    """
+    Documentation References:
+    https://docs.blender.org/api/current/bpy.types.GeometryNode.html
+    https://docs.blender.org/manual/en/4.0/render/shader_nodes/index.html
+    https://docs.blender.org/api/current/bpy.types.html
+    """
+
+def active_object():
+    return bpy.context.active_object
+
+
+def link(node_tree, from_node, to_node, link_type1, link_type2):
+    node_tree.links.new(from_node.outputs[link_type1], to_node.inputs[link_type2])
+
+
+def create_node(node_tree, type_name, node_x_location, node_y_location):
+    node_obj = node_tree.nodes.new(type=type_name)
+    node_obj.location.x = node_x_location
+    node_obj.location.y = node_y_location
+
+    return node_obj
+
+
+def update_node_tree(node_tree):
+    """
+    Checks for recurrences in image data if you're using specific textures
+    """
+    
+    IMG = None
+    IMG_PATH = 'D:\\Blender\\Projects\\PythonShader\\References\\BrushTexturePNG.png'
+    
+    for i in bpy.data.images:
+        if i.filepath == IMG_PATH:
+            IMG = i
+            
+    if not IMG:
+        IMG = bpy.data.images.load(IMG_PATH)
+        
+    """   
+    Import nodes to build the node structure
+    """
+    
+    node_output = node_tree.nodes['Material Output']
+    bsdf = node_tree.nodes['Principled BSDF']
+    bsdf.inputs['Base Color'].default_value = (.040, .132, .388, 1.00)
+    
+    node1 = create_node(node_tree, 'ShaderNodeTexVoronoi', -400, 250)
+    
+    node2 = create_node(node_tree, 'ShaderNodeTexCoord', -1000, 250)
+    
+    node3 = create_node(node_tree, 'ShaderNodeMix', -600, 100)
+    node3.data_type = 'RGBA'
+    
+    node4 = create_node(node_tree, 'ShaderNodeTexNoise', -800, -100)
+
+    """
+    Linking nodes to create the desired output
+    """
+    
+    link(node_tree, node2, node4, "Object", "Vector")
+    
+    link(node_tree, node3, node1, "Result", "Vector")
+    
+    link(node_tree, node2, node3, "Normal", "A")
+    
+    link(node_tree, node4, node3, "Fac", "B")
+    
+    link(node_tree, node1, bsdf, "Position", "Normal")
+    
+
+def create_material_nodes():
+    """
+    Creates a sphere and attaches a new material to it
+    """
+    bpy.ops.mesh.primitive_ico_sphere_add()
+    for j in bpy.context.active_object.data.polygons:
+        j.use_smooth = True
+        
+    subd = bpy.context.active_object.modifiers.new('Subdivision', type='SUBSURF')
+    subd.levels = 3
+    
+    mat_name = 'Paint Shader'
+    mat = bpy.data.materials.new(mat_name)
+    mat.use_nodes = True
+
+    node_tree = mat.node_tree
+    
+    update_node_tree(node_tree)
+
+
+def main():
+    create_material_nodes()
+    
+
+if __name__ == "__main__":
+    main()
