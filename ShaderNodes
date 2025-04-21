@@ -1,8 +1,21 @@
 import random
 import time
 import bpy
+import openai
+import os
+import ast
 
     """
+    For this pull request, I wanted to focus on automating the shader node creation process in Blender using an LLM.
+    The goal is to allow users to describe the texture they want, and the LLM will generate the necessary shader 
+    nodes and links in Blender completely autnomously. In order to achieve this, I implemented the following features:
+
+    - Querying the LLM with a user prompt to generate shader node instructions.
+    - Validating the LLM response to ensure it follows the expected format.
+    - Parsing the LLM response to extract node creation, parameter setting, and linking instructions.
+    - Creating and linking shader nodes in Blender based on the parsed instructions.
+    - More robust error handling to ensure the process is smooth and user-friendly.
+    
     Documentation References:
     https://docs.blender.org/api/current/bpy.types.GeometryNode.html
     https://docs.blender.org/manual/en/4.0/render/shader_nodes/index.html
@@ -18,83 +31,179 @@ def link(node_tree, from_node, to_node, link_type1, link_type2):
 
 
 def create_node(node_tree, type_name, node_x_location, node_y_location):
-    node_obj = node_tree.nodes.new(type=type_name)
-    node_obj.location.x = node_x_location
-    node_obj.location.y = node_y_location
+    """
+    Creates a new shader node of the specified type at the given location. This improvement
+    allows for node type validation to ensure that the node creation process is robust to errors.
+    """
+    try:
+        node_obj = node_tree.nodes.new(type=type_name)
+        node_obj.location.x = node_x_location
+        node_obj.location.y = node_y_location
+        return node_obj
+    except Exception as e:
+        print(f"Error creating node '{type_name}': {e}")
+        return None
 
-    return node_obj
+
+def query_llm(prompt):
+    """
+    Queries the LLM API with a user prompt and returns the response.
+    """
+    openai.api_key = os.getenv("OPENAI_API_KEY")  # Set your API key as an environment variable
+
+    try:
+        """
+        Defines the correct format for the LLM response to allow for easy parsing while avoiding
+        using unnecessary tokens and improving response time and quality.
+        """
+        structured_prompt = (
+            f"{prompt}\n\n"
+            "Please provide the response in the following format:\n"
+            "Create nodes:\n"
+            "   - <NodeType> at (<x>, <y>)\n"
+            "Set parameters:\n"
+            "   - <NodeName>.<ParameterName> = <Value>\n"
+            "Link nodes:\n"
+            "   - <FromNode>.<OutputName> -> <ToNode>.<InputName>\n"
+        )
+        response = openai.Completion.create(
+            engine="text-davinci-003",  
+            prompt=structured_prompt,
+            max_tokens=300,
+            temperature=0.7
+        )
+        return response.choices[0].text.strip()
+    except Exception as e:
+        print(f"Error querying LLM: {e}")
+        return None
 
 
-def update_node_tree(node_tree):
+def validate_llm_response(response):
     """
-    Checks for recurrences in image data if you're using specific textures
+    Validates the LLM response to ensure it follows the expected format.
     """
-    
-    IMG = None
-    IMG_PATH = 'D:\\Blender\\Projects\\PythonShader\\References\\BrushTexturePNG.png'
-    
-    for i in bpy.data.images:
-        if i.filepath == IMG_PATH:
-            IMG = i
-            
-    if not IMG:
-        IMG = bpy.data.images.load(IMG_PATH)
-        
-    """   
-    Import nodes to build the node structure
-    """
-    
-    node_output = node_tree.nodes['Material Output']
-    bsdf = node_tree.nodes['Principled BSDF']
-    bsdf.inputs['Base Color'].default_value = (.040, .132, .388, 1.00)
-    
-    node1 = create_node(node_tree, 'ShaderNodeTexVoronoi', -400, 250)
-    
-    node2 = create_node(node_tree, 'ShaderNodeTexCoord', -1000, 250)
-    
-    node3 = create_node(node_tree, 'ShaderNodeMix', -600, 100)
-    node3.data_type = 'RGBA'
-    
-    node4 = create_node(node_tree, 'ShaderNodeTexNoise', -800, -100)
+    required_sections = ["Create nodes:", "Set parameters:", "Link nodes:"]
+    for section in required_sections:
+        if section not in response:
+            print(f"Error: Missing section '{section}' in LLM response.")
+            return False
 
-    """
-    Linking nodes to create the desired output
-    """
-    
-    link(node_tree, node2, node4, "Object", "Vector")
-    
-    link(node_tree, node3, node1, "Result", "Vector")
-    
-    link(node_tree, node2, node3, "Normal", "A")
-    
-    link(node_tree, node4, node3, "Fac", "B")
-    
-    link(node_tree, node1, bsdf, "Position", "Normal")
-    
+    # Additional validation for content
+    lines = response.split("\n")
+    for line in lines:
+        if line.strip() and not any(line.startswith(section) for section in required_sections):
+            if " at " not in line and "=" not in line and " -> " not in line:
+                print(f"Error: Malformed line in LLM response: {line}")
+                return False
 
-def create_material_nodes():
-    """
-    Creates a sphere and attaches a new material to it
-    """
-    bpy.ops.mesh.primitive_ico_sphere_add()
-    for j in bpy.context.active_object.data.polygons:
-        j.use_smooth = True
-        
-    subd = bpy.context.active_object.modifiers.new('Subdivision', type='SUBSURF')
-    subd.levels = 3
-    
-    mat_name = 'Paint Shader'
-    mat = bpy.data.materials.new(mat_name)
-    mat.use_nodes = True
+    return True
 
-    node_tree = mat.node_tree
-    
-    update_node_tree(node_tree)
+
+def parse_llm_response(response):
+    """
+    Parses the required information from the LLM response based on 
+    the defined format to automate the shader node creation process.
+    """
+    instructions = {
+        "create_nodes": [],
+        "set_parameters": [],
+        "link_nodes": []
+    }
+
+    lines = response.split("\n")
+    current_section = None
+
+    # Iterate through each line and categorize it based on the section headers
+    for line in lines:
+        line = line.strip()
+        if line.startswith("Create nodes:"):
+            current_section = "create_nodes"
+        elif line.startswith("Set parameters:"):
+            current_section = "set_parameters"
+        elif line.startswith("Link nodes:"):
+            current_section = "link_nodes"
+        elif current_section and line:
+            instructions[current_section].append(line)
+
+    return instructions
+
+
+def execute_instructions(node_tree, instructions):
+    """
+    Executes the parsed instructions to create and link shader nodes.
+    """
+    node_map = {}  # Map to store created node for efficient lookup for linking, and parameter setting
+
+    # Create nodes
+    for node_instruction in instructions["create_nodes"]:
+        parts = node_instruction.split(" at ")
+        node_type = parts[0].strip()
+        location = ast.literal_eval(parts[1])  # Convert string "(x, y)" to tuple safely
+        node = create_node(node_tree, node_type, location[0], location[1])
+        node_map[node_type] = node
+
+    # Set parameters
+    for param_instruction in instructions["set_parameters"]:
+        parts = param_instruction.split("=")
+        node_param = parts[0].strip().split(".")
+        node_name = node_param[0]
+        param_name = node_param[1]
+        value = ast.literal_eval(parts[1].strip())  # Convert string to appropriate type safely
+
+        # Check the parameter validation to prevent errors and handle missing nodes in the node map 
+        if node_name in node_map:
+            try:
+                setattr(node_map[node_name].inputs[param_name], "default_value", value)
+            except AttributeError:
+                print(f"Invalid parameter '{param_name}' for node '{node_name}'.")
+        else:
+            print(f"Node '{node_name}' not found in node_map.")
+
+    # Link nodes
+    for link_instruction in instructions["link_nodes"]:
+        parts = link_instruction.split(" -> ")
+        from_node_output = parts[0].split(".")
+        to_node_input = parts[1].split(".")
+        from_node = node_map.get(from_node_output[0])
+        to_node = node_map.get(to_node_input[0])
+        if from_node and to_node:
+            link(node_tree, from_node, to_node, from_node_output[1], to_node_input[1])
+        else:
+            print(f"Error linking nodes: '{from_node_output[0]}' or '{to_node_input[0]}' not found.")
+
+
+def create_default_shader(node_tree):
+    """
+    Creates a default shader setup in case of errors or invalid responses from the LLM response
+    to ensure the user has a working shader. 
+    """
+    # Example default shader setup
+    bsdf_node = create_node(node_tree, "ShaderNodeBsdfPrincipled", 0, 0)
+    output_node = create_node(node_tree, "ShaderNodeOutputMaterial", 200, 0)
+    if bsdf_node and output_node:
+        link(node_tree, bsdf_node, output_node, "BSDF", "Surface")
 
 
 def main():
-    create_material_nodes()
-    
+    # Get user input for the texture description
+    texture_description = input("Describe the texture you want (e.g., 'Create a marble texture'): ")
 
-if __name__ == "__main__":
-    main()
+    # Query the LLM for shader node instructions
+    llm_response = query_llm(f"Generate Blender shader node instructions for: {texture_description}")
+
+    # Create a new material and get its node tree
+    mat_name = "Generated Shader"
+    mat = bpy.data.materials.new(mat_name)
+    mat.use_nodes = True
+    node_tree = mat.node_tree
+
+    if llm_response:
+        if validate_llm_response(llm_response):
+            instructions = parse_llm_response(llm_response)
+            execute_instructions(node_tree, instructions)
+        else:
+            print("Invalid LLM response format. Creating a default shader setup.")
+            create_default_shader(node_tree)
+    else:
+        print("Failed to get a response from the LLM. Creating a default shader setup.")
+        create_default_shader(node_tree)
